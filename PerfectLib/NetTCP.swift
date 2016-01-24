@@ -23,16 +23,21 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-
-import Dispatch
-import Darwin
+import Foundation
+#if os(Linux)
+import SwiftGlibc
+let AF_UNSPEC: Int32 = 0
+let AF_INET: Int32 = 2
+let INADDR_NONE = UInt32(0xffffffff)
+let EINPROGRESS = Int32(115)
+#endif
 
 /// Provides an asynchronous IO wrapper around a file descriptor.
 /// Fully realized for TCP socket types but can also serve as a base for sockets from other families, such as with `NetNamedPipe`/AF_UNIX.
 public class NetTCP : Closeable {
 	
 	private var networkFailure: Bool = false
-	private var semaphore: dispatch_semaphore_t?
+	private var semaphore: Threading.Event?
 	private var waitAcceptEvent: LibEvent?
 	
 	class ReferenceBuffer {
@@ -71,10 +76,54 @@ public class NetTCP : Closeable {
 	/// All sub-class sockets should be switched to utilize non-blocking IO by calling `SocketFileDescriptor.switchToNBIO()`.
 	public func initSocket() {
 		if fd.fd == invalidSocket {
+		#if os(Linux)
+			fd.fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+		#else
 			fd.fd = socket(AF_INET, SOCK_STREAM, 0)
+		#endif
 			fd.family = AF_INET
 			fd.switchToNBIO()
 		}
+	}
+	
+	public func sockName() -> (String, UInt16) {
+		let staticBufferSize = 1024
+		var addr = UnsafeMutablePointer<sockaddr_in>.alloc(1)
+		let len = UnsafeMutablePointer<socklen_t>.alloc(1)
+		let buffer = UnsafeMutablePointer<Int8>.alloc(staticBufferSize)
+		defer {
+			addr.dealloc(1)
+			len.dealloc(1)
+			buffer.dealloc(staticBufferSize)
+		}
+		len.memory = socklen_t(sizeof(sockaddr_in))
+		getsockname(fd.fd, UnsafeMutablePointer<sockaddr>(addr), len)
+		inet_ntop(fd.family, &addr.memory.sin_addr, buffer, len.memory)
+		
+		let s = String.fromCString(buffer) ?? ""
+		let p = ntohs(addr.memory.sin_port)
+		
+		return (s, p)
+	}
+	
+	public func peerName() -> (String, UInt16) {
+		let staticBufferSize = 1024
+		var addr = UnsafeMutablePointer<sockaddr_in>.alloc(1)
+		let len = UnsafeMutablePointer<socklen_t>.alloc(1)
+		let buffer = UnsafeMutablePointer<Int8>.alloc(staticBufferSize)
+		defer {
+			addr.dealloc(1)
+			len.dealloc(1)
+			buffer.dealloc(staticBufferSize)
+		}
+		len.memory = socklen_t(sizeof(sockaddr_in))
+		getpeername(fd.fd, UnsafeMutablePointer<sockaddr>(addr), len)
+		inet_ntop(fd.family, &addr.memory.sin_addr, buffer, len.memory)
+		
+		let s = String.fromCString(buffer) ?? ""
+		let p = ntohs(addr.memory.sin_port)
+		
+		return (s, p)
 	}
 	
 	func isEAgain(err: Int) -> Bool {
@@ -98,10 +147,18 @@ public class NetTCP : Closeable {
 		guard res != -1 else {
 			try ThrowNetworkError()
 		}
-		var sock_addr = sockaddr(sa_len: 0, sa_family: 0, sa_data: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+		let i0 = Int8(0)
+	#if os(Linux)
+		var sock_addr = sockaddr(sa_family: 0, sa_data: (i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0))
+	#else
+		var sock_addr = sockaddr(sa_len: 0, sa_family: 0, sa_data: (i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0))
+	#endif
 		memcpy(&sock_addr, &addr, Int(sizeof(sockaddr_in)))
-		
+	#if os(Linux)
+		let bRes = SwiftGlibc.bind(fd.fd, &sock_addr, socklen_t(sizeof(sockaddr_in)))
+	#else
 		let bRes = Darwin.bind(fd.fd, &sock_addr, socklen_t(sizeof(sockaddr_in)))
+	#endif
 		if bRes == -1 {
 			try ThrowNetworkError()
 		}
@@ -109,15 +166,24 @@ public class NetTCP : Closeable {
 	
 	/// Switches the socket to server mode. Socket should have been previously bound using the `bind` function.
 	public func listen(backlog: Int32 = 128) {
+	#if os(Linux)
+		SwiftGlibc.listen(fd.fd, backlog)
+	#else
 		Darwin.listen(fd.fd, backlog)
+	#endif
 	}
 	
 	/// Shuts down and closes the socket.
 	/// The object may be reused.
 	public func close() {
 		if fd.fd != invalidSocket {
-			Darwin.shutdown(fd.fd, SHUT_RDWR)
+		#if os(Linux)
+			shutdown(fd.fd, 2) // !FIX!
+			SwiftGlibc.close(fd.fd)
+		#else
+			shutdown(fd.fd, SHUT_RDWR)
 			Darwin.close(fd.fd)
+		#endif
 			fd.fd = invalidSocket
 			
 			if let event = self.waitAcceptEvent {
@@ -126,17 +192,27 @@ public class NetTCP : Closeable {
 			}
 			
 			if self.semaphore != nil {
-				dispatch_semaphore_signal(self.semaphore!)
+				self.semaphore!.lock()
+				self.semaphore!.signal()
+				self.semaphore!.unlock()
 			}
 		}
 	}
 	
 	func recv(buf: UnsafeMutablePointer<Void>, count: Int) -> Int {
+	#if os(Linux)
+		return SwiftGlibc.recv(self.fd.fd, buf, count, 0)
+	#else
 		return Darwin.recv(self.fd.fd, buf, count, 0)
+	#endif
 	}
 	
 	func send(buf: UnsafePointer<Void>, count: Int) -> Int {
+	#if os(Linux)
+		return SwiftGlibc.send(self.fd.fd, buf, count, 0)
+	#else
 		return Darwin.send(self.fd.fd, buf, count, 0)
+	#endif
 	}
 	
 	private func makeAddress(inout sin: sockaddr_in, host: String, port: UInt16) -> Int {
@@ -265,14 +341,16 @@ public class NetTCP : Closeable {
 		let length = bytes.count
 		var totalSent = 0
 		let ptr = UnsafeMutablePointer<UInt8>(bytes)
-		var s: dispatch_semaphore_t?
+		var s: Threading.Event?
 		var what: Int32 = 0
 		
 		let waitFunc = {
 			let event: LibEvent = LibEvent(base: LibEvent.eventBase, fd: self.fd.fd, what: EV_WRITE, userData: nil) {
 				(fd:Int32, w:Int16, ud:AnyObject?) -> () in
 				what = Int32(w)
-				dispatch_semaphore_signal(s!)
+				s!.lock()
+				s!.signal()
+				s!.unlock()
 			}
 			event.add()
 		}
@@ -285,11 +363,12 @@ public class NetTCP : Closeable {
 			}
 			
 			if s == nil {
-				s = dispatch_semaphore_create(0)
+				s = Threading.Event()
 			}
 			
 			if sent == -1 {
 				if isEAgain(sent) { // flow
+					s!.lock()
 					waitFunc()
 				} else { // error
 					break
@@ -300,12 +379,12 @@ public class NetTCP : Closeable {
 				if totalSent == length {
 					return true
 				}
-				
+				s!.lock()
 				waitFunc()
 			}
 			
-			dispatch_semaphore_wait(s!, DISPATCH_TIME_FOREVER)
-			
+			s!.wait()
+			s!.unlock()
 			if what != EV_WRITE {
 				break
 			}
@@ -362,10 +441,19 @@ public class NetTCP : Closeable {
 		guard res != -1 else {
 			try ThrowNetworkError()
 		}
-		var sock_addr = sockaddr(sa_len: 0, sa_family: 0, sa_data: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+		let i0 = Int8(0)
+	#if os(Linux)
+		var sock_addr = sockaddr(sa_family: 0, sa_data: (i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0))
+	#else
+		var sock_addr = sockaddr(sa_len: 0, sa_family: 0, sa_data: (i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0, i0))
+	#endif
 		memcpy(&sock_addr, &addr, Int(sizeof(sockaddr_in)))
 		
+	#if os(Linux)
+		let cRes = SwiftGlibc.connect(fd.fd, &sock_addr, socklen_t(sizeof(sockaddr_in)))
+	#else
 		let cRes = Darwin.connect(fd.fd, &sock_addr, socklen_t(sizeof(sockaddr_in)))
+	#endif
 		if cRes != -1 {
 			callBack(self)
 		} else {
@@ -391,7 +479,11 @@ public class NetTCP : Closeable {
 	/// - parameter callBack: The closure which will be called when the accept completes. the parameter will be a newly allocated instance of NetTCP which represents the client.
 	/// - returns: `PerfectError.NetworkError`
 	public func accept(timeoutSeconds: Double, callBack: (NetTCP?) -> ()) throws {
+	#if os(Linux)
+		let accRes = SwiftGlibc.accept(fd.fd, UnsafeMutablePointer<sockaddr>(), UnsafeMutablePointer<socklen_t>())
+	#else
 		let accRes = Darwin.accept(fd.fd, UnsafeMutablePointer<sockaddr>(), UnsafeMutablePointer<socklen_t>())
+	#endif
 		if accRes != -1 {
 			let newTcp = self.makeFromFd(accRes)
 			callBack(newTcp)
@@ -418,7 +510,12 @@ public class NetTCP : Closeable {
 	}
 	
 	private func tryAccept() -> Int32 {
-		let accRes = Darwin.accept(fd.fd, UnsafeMutablePointer<sockaddr>(), UnsafeMutablePointer<socklen_t>())
+		#if os(Linux)
+			let accRes = SwiftGlibc.accept(fd.fd, UnsafeMutablePointer<sockaddr>(), UnsafeMutablePointer<socklen_t>())
+		#else
+			let accRes = Darwin.accept(fd.fd, UnsafeMutablePointer<sockaddr>(), UnsafeMutablePointer<socklen_t>())
+		#endif
+
 		return accRes
 	}
 	
@@ -430,7 +527,9 @@ public class NetTCP : Closeable {
 			if (Int32(w) & EV_TIMEOUT) != 0 {
 				print("huh?")
 			} else {
-				dispatch_semaphore_signal(self.semaphore!)
+				self.semaphore!.lock()
+				self.semaphore!.signal()
+				self.semaphore!.unlock()
 			}
 		}
 		self.waitAcceptEvent = event
@@ -445,21 +544,23 @@ public class NetTCP : Closeable {
 			return
 		}
 		
-		self.semaphore = dispatch_semaphore_create(0)
+		self.semaphore = Threading.Event()
 		defer { self.semaphore = nil }
 		
 		repeat {
 		
 			let accRes = tryAccept()
 			if accRes != -1 {
-				split_thread {
+				Threading.dispatchBlock {
 					callBack(self.makeFromFd(accRes))
 				}
 			} else if self.isEAgain(Int(accRes)) {
+				self.semaphore!.lock()
 				waitAccept()
-				dispatch_semaphore_wait(self.semaphore!, DISPATCH_TIME_FOREVER)
+				self.semaphore!.wait()
+				self.semaphore!.unlock()
 			} else {
-				let errStr = String.fromCString(strerror(errno)) ?? "NO MESSAGE"
+				let errStr = String.fromCString(strerror(Int32(errno))) ?? "NO MESSAGE"
 				print("Unexpected networking error: \(errno) '\(errStr)'")
 				networkFailure = true
 			}

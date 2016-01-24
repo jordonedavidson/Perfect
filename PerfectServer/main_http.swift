@@ -23,19 +23,92 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-
-import Darwin
 import PerfectLib
+#if os(Linux)
+import SwiftGlibc
+#else
+import Darwin
+#endif
 
 func startServer() throws {
 	
-	let dir = String.fromCString(getcwd(nil, 0)) ?? ""
-	print("Current working directory: \(dir)")
-
 	let ls = PerfectServer.staticPerfectServer
 	ls.initializeServices()
-
-	try Dir(dir + "/webroot/").create()
-	let httpServer = HTTPServer(documentRoot: dir + "/webroot/")
-	try httpServer.start(8181)
+	
+	var webRoot = "./webroot/"
+	var serverName = ""
+	var localAddress = "0.0.0.0"
+	var localPort = 8181
+	var sslCert: String?
+	var sslKey: String?
+	
+	var args = Process.arguments
+	
+	let validArgs = [
+		"--sslcert": {
+			args.removeFirst()
+			sslCert = args.first!
+		},
+		"--sslkey": {
+			args.removeFirst()
+			sslKey = args.first!
+		},
+		"--port": {
+			args.removeFirst()
+			localPort = Int(args.first!) ?? 8181
+		},
+		"--address": {
+			args.removeFirst()
+			localAddress = args.first!
+		},
+		"--root": {
+			args.removeFirst()
+			webRoot = args.first!
+		},
+		"--name": {
+			args.removeFirst()
+			serverName = args.first!
+		},
+		"--help": {
+			print("Usage: \(Process.arguments.first!) [--port listen_port] [--address listen_address] [--name server_name] [--root root_path] [--sslcert cert_path --sslkey key_path]")
+			exit(0)
+		}]
+	
+	while args.count > 0 {
+		if let closure = validArgs[args.first!.lowercaseString] {
+			closure()
+		}
+		args.removeFirst()
+	}
+	
+	try Dir(webRoot).create()
+	let httpServer = HTTPServer(documentRoot: webRoot)
+	httpServer.serverName = serverName
+	do {
+		if sslCert != nil || sslKey != nil {
+			
+			if sslCert == nil || sslKey == nil {
+				print("Error: if either --sslcert or --sslkey is provided then both --sslcert and --sslkey must be provided.")
+				exit(-1)
+			}
+			
+			if !File(sslCert!).exists() || !File(sslKey!).exists() {
+				print("Error: --sslcert or --sslkey file did not exist.")
+				exit(-1)
+			}
+			
+			try httpServer.start(UInt16(localPort), sslCert: sslCert!, sslKey: sslKey!, bindAddress: localAddress)
+			
+		} else {
+			try httpServer.start(UInt16(localPort), bindAddress: localAddress)
+		}
+	} catch PerfectError.NetworkError(let err, let msg) {
+		print("Network error thrown: \(err) \(msg)")
+	}
 }
+
+
+
+
+
+

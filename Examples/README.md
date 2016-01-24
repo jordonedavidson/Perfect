@@ -4,6 +4,8 @@
 These examples illustrate how Xcode projects which use Perfect are organized and how the clients and servers are run and debugged. Each example aims to show a different aspect of how Perfect operates with the goal of getting developers up to speed and creating their own server solutions.
 
 * [Getting Started](#getting-started)
+* [URL Routing](URL%20Routing/#url-routing)
+* [WebSockets](WebSockets%20Server/#websockets-server)
 * [Tap Tracker](Tap%20Tracker/#tap-tracker)
 * [Upload Enumerator](Upload%20Enumerator/#upload-enumerator)
 * [Authenticator](Authenticator/#authenticator)
@@ -19,7 +21,16 @@ Example end point in source code:
 
 ![End Point Edit](../SiteAssets/end_point_edit.png)
 
+## Linux Build Notes
+First, ensure you have built [PerfectLib](../PerfectLib/#perfectlib) and [Perfect Server](../PerfectServer/#perfectserver).
+
+* cd into the desired example directory
+* make
+* This will produce a .so library which should be copied or linked into the PerfectLibraries directory in whatever location you are running the Perfect Server from.
+
 ## Example Apps
+* [URL Routing](URL%20Routing/#url-routing)
+* [WebSockets](WebSockets%20Server/#websockets-server)
 * [Tap Tracker](Tap%20Tracker/#tap-tracker)
 * [Upload Enumerator](Upload%20Enumerator/#upload-enumerator)
 * [Authenticator](Authenticator/#authenticator)

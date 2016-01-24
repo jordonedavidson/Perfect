@@ -43,6 +43,10 @@ public class HTTPServer {
 	/// The local address on which the server is listening. The default of 0.0.0.0 indicates any local address.
 	public var serverAddress = "0.0.0.0"
 	
+	/// The canonical server name.
+	/// This is important if utilizing the `WebRequest.serverName` "SERVER_NAME" variable.
+	public var serverName = ""
+	
 	/// Initialize the server with a document root.
 	/// - parameter documentRoot: The document root for the server.
 	public init(documentRoot: String) {
@@ -66,7 +70,33 @@ public class HTTPServer {
 		
 		defer { socket.close() }
 		
-		print("Starting HTTP server on \(bindAddress):\(port)")
+		print("Starting HTTP server on \(bindAddress):\(port) with document root \(self.documentRoot)")
+		
+		self.start()
+	}
+	
+	/// Start the server on the indicated TCP port and optional address.
+	/// - parameter port: The port on which to bind.
+	/// - parameter sslCert: The server SSL certificate file.
+	/// - parameter sslKey: The server SSL key file.
+	/// - parameter bindAddress: The local address on which to bind.
+	public func start(port: UInt16, sslCert: String, sslKey: String, bindAddress: String = "0.0.0.0") throws {
+		
+		self.serverPort = port
+		self.serverAddress = bindAddress
+		
+		let socket = NetTCPSSL()
+		socket.initSocket()
+		socket.useCertificateChainFile(sslCert)
+		socket.usePrivateKeyFile(sslKey)
+		try socket.bind(port, address: bindAddress)
+		socket.listen()
+		
+		self.net = socket
+		
+		defer { socket.close() }
+		
+		print("Starting HTTPS server on \(bindAddress):\(port) with document root \(self.documentRoot)")
 		
 		self.start()
 	}
@@ -75,11 +105,13 @@ public class HTTPServer {
 		
 		if let n = self.net {
 			
+			self.serverAddress = n.sockName().0
+			
 			n.forEachAccept {
 				(net: NetTCP?) -> () in
 				
 				if let n = net {
-					split_thread {
+					Threading.dispatchBlock {
 						self.handleConnection(n)
 					}
 				}
@@ -96,7 +128,7 @@ public class HTTPServer {
 	}
 	
 	func handleConnection(net: NetTCP) {
-		let req = HTTPWebConnection(net: net)
+		let req = HTTPWebConnection(net: net, server: self)
 		req.readRequest { requestOk in
 			if requestOk {
 				self.runRequest(req)
@@ -133,13 +165,24 @@ public class HTTPServer {
 	
 	// returns true if the request pointed to a file which existed
 	// and the request was properly handled
-	func runRequest(req: HTTPWebConnection, withPathInfo: String) -> Bool {
+	func runRequest(req: HTTPWebConnection, withPathInfo: String, completion: (Bool) -> ()) {
+		
+		if PageHandlerRegistry.hasGlobalHandler() {
+			req.requestParams["PATH_INFO"] = withPathInfo
+			
+			let request = WebRequest(req)
+			let response = WebResponse(req, request: request)
+			return response.respond() {
+				return completion(true)
+			}
+		}
+		
 		let filePath = self.documentRoot + withPathInfo
 		let ext = withPathInfo.pathExtension.lowercaseString
 		if ext == mustacheExtension {
 			
 			if !File(filePath).exists() {
-				return false
+				return completion(false)
 			}
 			
 			// PATH_INFO may have been altered. set it to this version
@@ -147,37 +190,46 @@ public class HTTPServer {
 			
 			let request = WebRequest(req)
 			let response = WebResponse(req, request: request)
-			response.respond()
-			return true
+			return response.respond() {
+				return completion(true)
+			}
 			
 		} else if ext.isEmpty {
 			
-			if !withPathInfo.hasSuffix(".") && self.runRequest(req, withPathInfo: withPathInfo + ".\(mustacheExtension)") {
-				return true
-			}
-			
-			let pathDir = Dir(filePath)
-			if pathDir.exists() {
-				
-				if self.runRequest(req, withPathInfo: withPathInfo + "/index.\(mustacheExtension)") {
-					return true
-				}
-				
-				if self.runRequest(req, withPathInfo: withPathInfo + "/index.html") {
-					return true
+			if !withPathInfo.hasSuffix(".") {
+				return self.runRequest(req, withPathInfo: withPathInfo + ".\(mustacheExtension)") {
+					b in
+					if b {
+						return completion(true)
+					}
+					let pathDir = Dir(filePath)
+					if pathDir.exists() {
+						
+						self.runRequest(req, withPathInfo: withPathInfo + "/index.\(mustacheExtension)") {
+							b in
+							if b {
+								return completion(true)
+							}
+							self.runRequest(req, withPathInfo: withPathInfo + "/index.html") {
+								b in
+								return completion(b)
+							}
+						}
+					} else {
+						return completion(false)
+					}
 				}
 			}
 			
 		} else {
 			
 			let file = File(filePath)
-			
 			if file.exists() {
 				self.sendFile(req, file: file)
-				return true
+				return completion(true)
 			}
 		}
-		return false
+		return completion(false)
 	}
 	
 	func runRequest(req: HTTPWebConnection) {
@@ -191,17 +243,19 @@ public class HTTPServer {
 		
 		req.requestParams["PERFECTSERVER_DOCUMENT_ROOT"] = self.documentRoot
 		
-		if !self.runRequest(req, withPathInfo: pathInfo) {
-			req.setStatus(404, msg: "NOT FOUND")
-			let msg = "The file \"\(pathInfo)\" was not found.".utf8
-			req.writeHeaderLine("Content-length: \(msg.count)")
-			req.writeBodyBytes([UInt8](msg))
-		}
-		
-		if req.httpKeepAlive {
-			self.handleConnection(req.connection)
-		} else {
-			req.connection.close()
+		self.runRequest(req, withPathInfo: pathInfo) {
+			b in
+			if !b {
+				req.setStatus(404, msg: "NOT FOUND")
+				let msg = "The file \"\(pathInfo)\" was not found.".utf8
+				req.writeHeaderLine("Content-length: \(msg.count)")
+				req.writeBodyBytes([UInt8](msg))
+			}
+			if req.httpKeepAlive {
+				self.handleConnection(req.connection)
+			} else {
+				req.connection.close()
+			}
 		}
 	}
 	
@@ -224,12 +278,16 @@ public class HTTPServer {
 		var workingBufferOffset = 0
 		var lastHeaderKey = "" // for handling continuations
 		
+		let serverName: String
+		let serverAddr: String
+		let serverPort: UInt16
+		
 		var contentType: String? {
 			return self.requestParams["CONTENT_TYPE"]
 		}
 		
 		var httpOneOne: Bool {
-			return (self.requestParams["SERVER_PROTOCOL"] ?? "").containsString("1.1")
+			return (self.requestParams["SERVER_PROTOCOL"] ?? "").contains("1.1")
 		}
 		
 		var httpVersion: String {
@@ -237,13 +295,16 @@ public class HTTPServer {
 		}
 		
 		var httpKeepAlive: Bool {
-			return (self.requestParams["HTTP_CONNECTION"] ?? "").lowercaseString.containsString("keep-alive")
+			return (self.requestParams["HTTP_CONNECTION"] ?? "").lowercaseString.contains("keep-alive")
 		}
 		
-		init(net: NetTCP) {
+		init(net: NetTCP, server: HTTPServer) {
 			self.connection = net
 			self.statusCode = 200
 			self.statusMsg = "OK"
+			self.serverName = server.serverName
+			self.serverAddr = server.serverAddress
+			self.serverPort = server.serverPort
 		}
 		
 		func setStatus(code: Int, msg: String) {
@@ -284,7 +345,7 @@ public class HTTPServer {
 			case "Authorization":
 				return "HTTP_AUTHORIZATION"
 			default:
-				return "HTTP_" + name.uppercaseString.stringByReplacingOccurrencesOfString("-", withString: "_")
+				return "HTTP_" + name.uppercaseString.stringByReplacingString("-", withString: "_")
 			}
 		}
 		
@@ -332,7 +393,7 @@ public class HTTPServer {
 			self.connection.readSomeBytes(size) {
 				(b:[UInt8]?) in
 				
-				if b == nil {
+				if b == nil || b!.count == 0 {
 					self.connection.readBytesFully(1, timeoutSeconds: httpReadTimeout) {
 						(b:[UInt8]?) in
 						
@@ -388,8 +449,15 @@ public class HTTPServer {
 			self.requestParams["QUERY_STRING"] = queryString
 			self.requestParams["SERVER_PROTOCOL"] = hvers
 			self.requestParams["GATEWAY_INTERFACE"] = "PerfectHTTPD"
-			// !FIX! 
-			// REMOTE_ADDR, REMOTE_PORT, SERVER_ADDR, SERVER_PORT
+			
+			let (remoteHost, remotePort) = self.connection.peerName()
+			
+			self.requestParams["REMOTE_ADDR"] = remoteHost
+			self.requestParams["REMOTE_PORT"] = "\(remotePort)"
+			
+			self.requestParams["SERVER_NAME"] = self.serverName
+			self.requestParams["SERVER_ADDR"] = self.serverAddr
+			self.requestParams["SERVER_PORT"] = "\(self.serverPort)"
 			return true
 		}
 		

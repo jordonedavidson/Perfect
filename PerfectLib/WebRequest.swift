@@ -32,6 +32,9 @@
 /// - Establishing the document root, from which response files are located
 ///
 /// Access to the current WebRequest object is generally provided through the corresponding WebResponse object
+
+import Foundation
+
 public class WebRequest {
 	
 	var connection: WebConnection
@@ -40,15 +43,19 @@ public class WebRequest {
 	
 	private var cachedHttpAuthorization: [String:String]? = nil
 	
+	/// Variables set by the URL routing process
+	public lazy var urlVariables = [String:String]()
+	
 	/// A `Dictionary` containing all HTTP header names and values
 	/// Only HTTP headers are included in the result. Any "meta" headers, i.e. those provided by the web server, are discarded.
 	lazy var headers: Dictionary<String, String> = {
 		var d = Dictionary<String, String>()
 		for (key, value) in self.connection.requestParams {
 			if key.hasPrefix("HTTP_") {
-				let index = key.startIndex.advancedBy(5)
-				let nKey = key.substringFromIndex(index)
-				d[nKey.stringByReplacingOccurrencesOfString("_", withString: "-")] = value
+				let utf16 = key.utf16
+				let index = key.utf16.startIndex.advancedBy(5)
+				let nKey = String(key.utf16.suffixFrom(index))!
+				d[nKey.stringByReplacingString("_", withString: "-")] = value
 			}
 		}
 		return d
@@ -63,8 +70,8 @@ public class WebRequest {
 			
 			let cookieSplit = cookiePair.characters.split("=").map { String($0.filter { $0 != " " }) }
 			if cookieSplit.count == 2 {
-				let name = cookieSplit[0].stringByRemovingPercentEncoding
-				let value = cookieSplit[1].stringByRemovingPercentEncoding
+				let name = cookieSplit[0].stringByDecodingURL
+				let value = cookieSplit[1].stringByDecodingURL
 				if let n = name {
 					c.append((n, value ?? ""))
 				}
@@ -82,8 +89,8 @@ public class WebRequest {
 			
 			let paramSplit = paramPair.characters.split("=").map { String($0) }
 			if paramSplit.count == 2 {
-				let name = paramSplit[0].stringByRemovingPercentEncoding
-				let value = paramSplit[1].stringByRemovingPercentEncoding
+				let name = paramSplit[0].stringByDecodingURL
+				let value = paramSplit[1].stringByDecodingURL
 				if let n = name {
 					c.append((n, value ?? ""))
 				}
@@ -105,6 +112,27 @@ public class WebRequest {
 		return c
 	}()
 	
+	/// Return the raw POST body as a byte array
+	/// This is mainly useful when POSTing non-url-encoded and not-multipart form data
+	/// For example, if the content-type were application/json you could use this function to get the raw JSON data as bytes
+	public lazy var postBodyBytes: [UInt8] = {
+		if let stdin = self.connection.stdin {
+			return stdin
+		}
+		return [UInt8]()
+	}()
+	
+	/// Return the raw POST body as a String
+	/// This is mainly useful when POSTing non-url-encoded and not-multipart form data
+	/// For example, if the content-type were application/json you could use this function to get the raw JSON data as a String
+	public lazy var postBodyString: String = {
+		if let stdin = self.connection.stdin {
+			let qs = UTF8Encoding.encode(stdin)
+			return qs
+		}
+		return ""
+	}()
+	
 	/// A tuple array containing each POST parameter name/value pair
 	public lazy var postParams: [(String, String)] = {
 		var c = [(String, String)]()
@@ -122,8 +150,8 @@ public class WebRequest {
 				
 				let paramSplit = paramPair.characters.split("=").map { String($0) }
 				if paramSplit.count == 2 {
-					let name = paramSplit[0].stringByReplacingOccurrencesOfString("+", withString: " ").stringByRemovingPercentEncoding
-					let value = paramSplit[1].stringByReplacingOccurrencesOfString("+", withString: " ").stringByRemovingPercentEncoding
+					let name = paramSplit[0].stringByReplacingString("+", withString: " ").stringByDecodingURL
+					let value = paramSplit[1].stringByReplacingString("+", withString: " ").stringByDecodingURL
 					if let n = name {
 						c.append((n, value ?? ""))
 					}
@@ -266,7 +294,7 @@ public class WebRequest {
 	/// Returns true if the request was encrypted over HTTPS.
 	public func isHttps() -> Bool { return connection.requestParams["HTTPS"] ?? "" == "on" }
 	/// Returns the indicated HTTP header.
-	public func header(named: String) -> String? { return self.headers[named] }
+	public func header(named: String) -> String? { return self.headers[named.uppercaseString] }
 	/// Returns the raw request parameter header
 	public func rawHeader(named: String) -> String? { return self.connection.requestParams[named] }
 	/// Returns a Dictionary containing all raw request parameters.
@@ -287,7 +315,7 @@ public class WebRequest {
 	}
 	
 	private func extractField(from: String, named: String) -> String? {
-		guard let range = from.rangeOfString(named + "=") else {
+		guard let range = from.rangeOf(named + "=") else {
 			return nil
 		}
 		

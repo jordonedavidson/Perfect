@@ -24,7 +24,7 @@
 //
 
 
-import Dispatch
+import Foundation
 import cURL
 
 /// This class is a wrapper around the CURL library. It permits network operations to be completed using cURL in a block or non-blocking manner.
@@ -164,7 +164,7 @@ public class CURL {
 		if perf.0 == false { // done
 			closure(perf.1, header.data, body.data)
 		} else {
-			dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)) {
+			Threading.dispatchBlock {
 				self.performInner(header, body: body, closure: closure)
 			}
 		}

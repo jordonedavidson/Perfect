@@ -23,7 +23,10 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-import Darwin
+import Foundation
+#if os(Linux)
+import SwiftGlibc
+#endif
 
 let jsonOpenObject = UnicodeScalar(UInt32(123))
 let jsonOpenArray = UnicodeScalar(UInt32(91))
@@ -42,6 +45,9 @@ let jsonLF = UnicodeScalar(UInt32(10))
 let jsonCR = UnicodeScalar(UInt32(13))
 let jsonTab = UnicodeScalar(UInt32(9))
 
+public typealias JSONKey = String
+public typealias JSONValue = Any
+
 /// An exception enum type which represents JSON encoding and decoding errors
 public enum JSONError: ErrorType {
 	/// A data type was used which is not JSON encodable.
@@ -51,10 +57,10 @@ public enum JSONError: ErrorType {
 }
 
 class KeyPair {
-	let key: String
-	var value: AnyObject?
+	let key: JSONKey
+	var value: JSONValue?
 	
-	init(key: String) {
+	init(key: JSONKey) {
 		self.key = key
 	}
 }
@@ -62,8 +68,8 @@ class KeyPair {
 /// This class encodes Arrays and Dictionaries into JSON text strings
 ///
 /// Top-level values which may be encoded include
-/// - `Array<AnyObject>`
-/// - `Dictionary<String, AnyObject>`
+/// - `Array<JSONValue>`
+/// - `Dictionary<String, JSONValue>`
 /// - `JSONArray`
 /// - `JSONDictionary`
 ///
@@ -75,8 +81,8 @@ class KeyPair {
 /// - `JSONNull`
 /// - `JSONArray`
 /// - `JSONDictionary`
-/// - `Array<AnyObject>`
-/// - `Dictionary<String, AnyObject>`
+/// - `Array<JSONValue>`
+/// - `Dictionary<String, JSONValue>`
 public class JSONEncode {
 	
 	/// Empty public initializer
@@ -92,7 +98,7 @@ public class JSONEncode {
 	
 	/// Encode an Array of objects into a JSON string
 	/// - throws: A `JSONError.UnhandledType` exception
-	public func encode(a: Array<AnyObject>) throws -> String {
+	public func encode(a: [JSONValue]) throws -> String {
 		var s = "["
 		var c = false
 		for value in a {
@@ -115,7 +121,7 @@ public class JSONEncode {
 	
 	/// Encode a Dictionary into a JSON string
 	/// - throws: A `JSONError.UnhandledType` exception
-	public func encode(d: Dictionary<String, AnyObject>) throws -> String {
+	public func encode(d: [String:JSONValue]) throws -> String {
 		var s = "{"
 		var c = false
 		for (key, value) in d {
@@ -132,9 +138,11 @@ public class JSONEncode {
 		return s
 	}
 	
-	func encodeValue(value: AnyObject) throws -> String {
+	func encodeValue(value: JSONValue) throws -> String {
 		
 		switch(value) {
+		case let b as Bool:
+			return b ? "true" : "false"
 		case let i as Int:
 			return encodeInt(i)
 		case let d as Double:
@@ -143,18 +151,16 @@ public class JSONEncode {
 			return encodeString(s)
 		case let ja as JSONArrayType:
 			return try encodeArray(ja.array)
-		case let a as Array<AnyObject>:
+		case let a as Array<JSONValue>:
 			return try encodeArray(a)
 		case let jd as JSONDictionaryType:
 			return try encodeDictionary(jd.dictionary)
-		case let d as Dictionary<String, AnyObject>:
+		case let d as Dictionary<String, JSONValue>:
 			return try encodeDictionary(d)
 		case _ as JSONNull:
 			return "null"
-		case let b as Bool:
-			return b ? "true" : "false"
 		default:
-			throw JSONError.UnhandledType("The type \(value) was not handled")
+			throw JSONError.UnhandledType("The type \(value.dynamicType) was not handled")
 		}
 	}
 	
@@ -165,7 +171,7 @@ public class JSONEncode {
 			case jsonBackSlash:
 				s.appendContentsOf("\\\\")
 			case jsonQuoteDouble:
-				s.appendContentsOf("\"")
+				s.appendContentsOf("\\\"")
 			case jsonBackSpace:
 				s.appendContentsOf("\\b")
 			case jsonFormFeed:
@@ -192,11 +198,11 @@ public class JSONEncode {
 		return String(d)
 	}
 	
-	func encodeArray(a: Array<AnyObject>) throws -> String {
+	func encodeArray(a: Array<JSONValue>) throws -> String {
 		return try encode(a)
 	}
 	
-	func encodeDictionary(d: Dictionary<String, AnyObject>) throws -> String {
+	func encodeDictionary(d: Dictionary<String, JSONValue>) throws -> String {
 		return try encode(d)
 	}
 	
@@ -212,35 +218,35 @@ public class JSONNull {
 	}
 }
 
-/// This class is a reference based wrapper around `Array<AnyObject>`
+/// This class is a reference based wrapper around `Array<JSONValue>`
 /// JSON data which is being decoded will have these object as part of the contents of the resulting data.
 public class JSONArrayType {
 	
 	/// Provides access to the underlying array
-	public var array = Array<AnyObject>()
+	public var array = Array<JSONValue>()
 	
-	subscript (index: Int) -> Array<AnyObject>.Element {
+	public subscript (index: Int) -> Array<JSONValue>.Element {
 		return array[index]
 	}
 	
 	/// Pass-through function which appends to the array.
-	public func append(a: AnyObject) {
+	public func append(a: JSONValue) {
 		array.append(a)
 	}
 }
 
-/// This class is a referenced based wrapper around `Dictionary<String, AnyObject>`
+/// This class is a referenced based wrapper around `Dictionary<String, JSONValue>`
 /// JSON data which is being decoded will have these object as part of the contents of the resulting data.
 public class JSONDictionaryType {
 	
-	public typealias DictionaryType = Dictionary<String, AnyObject>
+	public typealias DictionaryType = Dictionary<JSONKey, JSONValue>
 	public typealias Key = DictionaryType.Key
 	public typealias Value = DictionaryType.Value
 	
 	/// Provides access to the underlying Dictionary.
 	public var dictionary = DictionaryType()
 	
-	subscript (key: Key) -> Value? {
+	public subscript (key: Key) -> Value? {
 		get {
 			return dictionary[key]
 		}
@@ -249,6 +255,8 @@ public class JSONDictionaryType {
 		}
 	}
 }
+
+private let malformedJSONString = "Malformed JSON string"
 
 /// This class decodes JSON string data and returns the resulting value(s)
 ///
@@ -262,8 +270,8 @@ public class JSONDictionaryType {
 /// - `JSONDictionary`
 public class JSONDecode {
 	
-	var stack = Array<AnyObject>()
-	var exit: AnyObject?
+	var stack = Array<JSONValue>()
+	var exit: JSONValue?
 	
 	var g = String().unicodeScalars.generate()
 	var pushBack: UnicodeScalar?
@@ -277,7 +285,7 @@ public class JSONDecode {
 	/// - parameter s: The JSON string data
 	/// - throws: `JSONError.SyntaxError`
 	/// - returns: The resulting object which may be one of `Int`, `Double`, `String`, `Bool`, `JSONNull`, `JSONArray` or `JSONDictionary`
-	public func decode(s: String) throws -> AnyObject {
+	public func decode(s: String) throws -> JSONValue {
 		
 		let scalars = s.unicodeScalars
 		g = scalars.generate()
@@ -308,11 +316,11 @@ public class JSONDecode {
 				try handlePop()
 			case jsonColon:
 				guard stack.count > 0 && stack.last! is KeyPair && (stack.last! as! KeyPair).value == nil else {
-					throw JSONError.SyntaxError("Malformed JSON string")
+					throw JSONError.SyntaxError(malformedJSONString)
 				}
 			case jsonComma:
 				guard stack.count > 0 && !(stack.last! is KeyPair) else {
-					throw JSONError.SyntaxError("Malformed JSON string")
+					throw JSONError.SyntaxError(malformedJSONString)
 				}
 			case jsonQuoteDouble:
 				try handlePop(try readString())
@@ -333,14 +341,14 @@ public class JSONDecode {
 		}
 	}
 	
-	func pop() throws -> AnyObject {
+	func pop() throws -> JSONValue {
 		guard stack.count > 0 else {
-			throw JSONError.SyntaxError("Malformed JSON string")
+			throw JSONError.SyntaxError(malformedJSONString)
 		}
 		return stack.removeLast()
 	}
 	
-	func handleNested(top: AnyObject, obj: AnyObject) throws -> AnyObject {
+	func handleNested(top: JSONValue, obj: JSONValue) throws -> JSONValue {
 		// top must be array or dictionary or KeyPair with value of nil
 		// if top is dictionary, obj must be KeyPair
 		
@@ -352,7 +360,7 @@ public class JSONDecode {
 			switch obj {
 			case let keyPair as KeyPair:
 				guard keyPair.value != nil else {
-					throw JSONError.SyntaxError("Malformed JSON string")
+					throw JSONError.SyntaxError(malformedJSONString)
 				}
 				d[keyPair.key] = keyPair.value!
 				return d
@@ -361,21 +369,21 @@ public class JSONDecode {
 				stack.append(ky)
 				return ky
 			default:
-				throw JSONError.SyntaxError("Malformed JSON string")
+				throw JSONError.SyntaxError(malformedJSONString)
 			}
 		case let pair as KeyPair:
 			guard pair.value == nil else {
-				throw JSONError.SyntaxError("Malformed JSON string")
+				throw JSONError.SyntaxError(malformedJSONString)
 			}
 			pair.value = obj
 			try pop()
 			return try handlePop(pair)
 		default:
-			throw JSONError.SyntaxError("Malformed JSON string")
+			throw JSONError.SyntaxError(malformedJSONString)
 		}
 	}
 	
-	func handlePop(a: AnyObject) throws -> AnyObject {
+	func handlePop(a: JSONValue) throws -> JSONValue {
 		if stack.count > 0 {
 			return try handleNested(stack.last!, obj: a)
 		}
@@ -383,10 +391,10 @@ public class JSONDecode {
 		return a
 	}
 	
-	func handlePop() throws -> AnyObject {
+	func handlePop() throws -> JSONValue {
 		
 		guard stack.count > 0 else {
-			throw JSONError.SyntaxError("Malformed JSON string")
+			throw JSONError.SyntaxError(malformedJSONString)
 		}
 		
 		return try handlePop(try pop())
@@ -427,7 +435,7 @@ public class JSONDecode {
 						}
 						hexStr.append(hexC)
 					}
-					let result = UnicodeScalar(UInt32(Darwin.strtoul(hexStr, nil, 16)))
+					let result = UnicodeScalar(UInt32(strtoul(hexStr, nil, 16)))
 					s.append(result)
 				default:
 					s.append(c)
@@ -446,7 +454,7 @@ public class JSONDecode {
 		throw JSONError.SyntaxError("Unterminated string literal")
 	}
 	
-	func readNumber(firstChar: UnicodeScalar) throws -> AnyObject {
+	func readNumber(firstChar: UnicodeScalar) throws -> JSONValue {
 		var s = ""
 		var needPeriod = true, needExp = true
 		s.append(firstChar)

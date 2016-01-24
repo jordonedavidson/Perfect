@@ -338,11 +338,11 @@ public class MustacheGroupTag : MustacheTag {
 				for child in children {
 					child.evaluate(newContext, collector: collector)
 				}
-			case let v as [String:String]:
-				let newContext = context.newChildContext(v)
-				for child in children {
-					child.evaluate(newContext, collector: collector)
-				}
+			// case let v as [String:String]:
+			// 	let newContext = context.newChildContext(v)
+			// 	for child in children {
+			// 		child.evaluate(newContext, collector: collector)
+			// 	}
 			case let sequence as MustacheEvaluationContext.SequenceType:
 				for item in sequence {
 					let newContext = context.newChildContext(item)
@@ -462,13 +462,13 @@ public class MustacheTemplate : MustacheGroupTag {
 			}
 		}
 		
-		if requireHandler && !foundHandler {
-			if let handler = PageHandlerRegistry.getPageHandler(context.webResponse!) {
-				foundHandler = true
-				let values = try handler.valuesForResponse(context, collector: collector)
-				context.extendValues(values)
-			}
-		}
+//		if requireHandler && !foundHandler {
+//			if let handler = PageHandlerRegistry.getPageHandler(context.webResponse!) {
+//				foundHandler = true
+//				let values = try handler.valuesForResponse(context, collector: collector)
+//				context.extendValues(values)
+//			}
+//		}
 		
 		if requireHandler && !foundHandler {
 			throw MustacheError.EvaluationError("No valid PageHandler was specified in the template's pragmas.")
@@ -702,8 +702,8 @@ public class MustacheParser {
 	// reads until closing delimiters
 	// read and discard closing delimiters leaving us things at .Plain
 	func consumeTagName() -> String {
-		let s = ""
-		return consumeTagName(s)
+		var s = ""
+		return consumeTagName(&s)
 	}
 	
 	// reads until closing delimiters
@@ -714,11 +714,11 @@ public class MustacheParser {
 			return ""
 		}
 		
-		let s = String(f)
-		return consumeTagName(s)
+		var s = String(f)
+		return consumeTagName(&s)
 	}
 	
-	func consumeTagName(var s: String) -> String {
+	func consumeTagName(inout s: String) -> String {
 		
 		while let e = next() {
 			

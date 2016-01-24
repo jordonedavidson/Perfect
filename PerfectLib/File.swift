@@ -23,8 +23,28 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
+#if os(Linux)
+import SwiftGlibc
+import LinuxBridge
 
+// !FIX! these are obviously sketchy
+// I hope SwiftGlibc to eventually include these
+// Otherwise, export them from LinuxBridge
+let S_IRGRP = (S_IRUSR >> 3)
+let S_IWGRP	= (S_IWUSR >> 3)
+let S_IRWXU = (__S_IREAD|__S_IWRITE|__S_IEXEC)
+let S_IRWXG = (S_IRWXU >> 3)
+let S_IRWXO = (S_IRWXG >> 3)
+
+let SEEK_CUR: Int32 = 1
+let EXDEV = Int32(18)
+let EACCES = Int32(13)
+let EAGAIN = Int32(11)
+let F_OK: Int32 = 0
+
+#else
 import Darwin
+#endif
 
 let fileCopyBufferSize = 16384
 
@@ -85,7 +105,10 @@ public class File : Closeable {
 			if res != -1 {
 				let ary = completeArray(buffer, count: res)
 				let trailPath = UTF8Encoding.encode(ary)
-				return internalPath.stringByDeletingLastPathComponent + "/" + trailPath
+				if trailPath[trailPath.startIndex] != "/" && trailPath[trailPath.startIndex] != "." {
+					return internalPath.stringByDeletingLastPathComponent + "/" + trailPath
+				}
+				return trailPath
 			}
 		}
 		return internalPath
@@ -102,7 +125,12 @@ public class File : Closeable {
 	/// Closes the file if it had been opened
 	public func close() {
 		if fd != -1 {
+		#if os(Linux)
+			SwiftGlibc.close(CInt(fd))
+		#else
 			Darwin.close(CInt(fd))
+		#endif
+			
 			fd = -1
 		}
 	}
@@ -115,7 +143,13 @@ public class File : Closeable {
 	/// Opens the file using the default open mode.
 	/// - throws: `PerfectError.FileError`
 	public func open() throws {
+		
+	#if os(Linux)
+		let openFd = linux_open(internalPath, CInt(openMode), mode_t(S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP))
+	#else
 		let openFd = Darwin.open(internalPath, CInt(openMode), mode_t(S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP))
+	#endif
+		
 		guard openFd != -1 else {
 			try ThrowFileError()
 		}
@@ -230,7 +264,11 @@ public class File : Closeable {
 		guard res == 0 else {
 			return Int.max
 		}
+#if os(Linux)
+		return Int(st.st_mtim.tv_sec)
+#else
 		return Int(st.st_mtimespec.tv_sec)
+#endif
 	}
 	
 	/// Moves the file to the new location, optionally overwriting any existing file
@@ -313,7 +351,7 @@ public class File : Closeable {
 		guard statRes != -1 else {
 			return 0
 		}
-		if (st.st_mode & S_IFMT) == S_IFREG {
+		if (Int32(st.st_mode) & Int32(S_IFMT)) == Int32(S_IFREG) {
 			return Int(st.st_size)
 		}
 		return value
@@ -342,7 +380,7 @@ public class File : Closeable {
 			return false
 		}
 		let mode = st.st_mode
-		return (mode & S_IFMT) == S_IFLNK
+		return (Int32(mode) & Int32(S_IFMT)) == Int32(S_IFLNK)
 	}
 	
 	/// Returns true if the file is actually a directory
@@ -472,8 +510,8 @@ public class File : Closeable {
 		if !isOpen() {
 			try openWrite()
 		}
-		let res = lockf(Int32(self.fd), F_TEST, off_t(byteCount))
-		guard res == 0 || res == EACCES || res == EAGAIN else {
+		let res = Int(lockf(Int32(self.fd), F_TEST, off_t(byteCount)))
+		guard res == 0 || res == Int(EACCES) || res == Int(EAGAIN) else {
 			try ThrowFileError()
 		}
 		return res != 0

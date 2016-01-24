@@ -1,6 +1,25 @@
 # Perfect - mod_perfect - Apache 2.4 Connector
 Write me!
-But here is a sample Apache .conf snippet. This uses mod_rewrite in order to provide extension-less URLs.
+
+## Linux Build Notes
+* cd into mod_perfect
+* make
+
+This will automatically install the appropriate Apache development resources if required, potentially prompting you for your sudo password. You must then install the produced mod_perfect.so as you would any other Apache module.
+
+## Configuration
+
+Here is an Apache conf snippet which pipes files/directories which do not exist through to Perfect Server. This is handy if you are using Perfect's URL routing system (or your own system).
+
+```
+	RewriteEngine on
+	RewriteCond %{REQUEST_FILENAME} !-f
+	RewriteCond %{REQUEST_FILENAME} !-d
+	RewriteRule (.*) - [L,NS,H=perfect-handler]
+
+```
+
+Here is a sample Apache .conf snippet. This uses mod_rewrite in order to provide extension-less URLs for mustache templates.
 
 ```
 <IfModule !perfect_module>

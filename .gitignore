@@ -31,3 +31,21 @@ DerivedData
 # Carthage/Checkouts
 
 Carthage/Build
+
+*.d
+
+*.o
+
+*.swiftdeps
+
+*.swiftdoc
+
+*.swiftmodule
+
+*.so
+
+*.DS_Store
+
+# Perfect binaries
+PerfectServer/perfectserverfcgi
+PerfectServer/perfectserverhttp

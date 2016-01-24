@@ -23,41 +23,7 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-
-/*
-read/write lock cache code
-This can easily be done using a custom concurrent queue and barriers. First, we'll create the dictionary and the queue:
-
-_cache = [[NSMutableDictionary alloc] init];
-_queue = dispatch_queue_create("com.mikeash.cachequeue", DISPATCH_QUEUE_CONCURRENT);
-To read from the cache, we can just use a dispatch_sync:
-
-- (id)cacheObjectForKey: (id)key
-{
-__block obj;
-dispatch_sync(_queue, ^{
-obj = [[_cache objectForKey: key] retain];
-});
-return [obj autorelease];
-}
-Because the queue is concurrent, this allows for concurrent access to the cache, and therefore no contention between multiple threads in the common case.
-
-To write to the cache, we need a barrier:
-
-- (void)setCacheObject: (id)obj forKey: (id)key
-{
-dispatch_barrier_async(_queue, ^{
-[_cache setObject: obj forKey: key];
-});
-}
-
-*/
-
-import Dispatch
-
-internal func split_thread(closure:()->()) {
-	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), closure)
-}
+import Foundation
 
 /// This class permits an UnsafeMutablePointer to be used as a GeneratorType
 public struct GenerateFromPointer<T> : GeneratorType {
@@ -80,7 +46,9 @@ public struct GenerateFromPointer<T> : GeneratorType {
 			return nil
 		}
 		self.count -= 1
-		return self.from[self.pos++]
+		let result = self.from[self.pos]
+		self.pos += 1
+		return result
 	}
 }
 
@@ -88,11 +56,13 @@ public struct GenerateFromPointer<T> : GeneratorType {
 public class Encoding {
 	
 	/// Return a String given a character generator.
-	public static func encode<D : UnicodeCodecType, G : GeneratorType where G.Element == D.CodeUnit>(var decoder : D, var generator: G) -> String {
+	public static func encode<D : UnicodeCodecType, G : GeneratorType where G.Element == D.CodeUnit>(decoder : D, generator: G) -> String {
 		var encodedString = ""
 		var finished: Bool = false
+		var mutableDecoder = decoder
+		var mutableGenerator = generator
 		repeat {
-			let decodingResult = decoder.decode(&generator)
+			let decodingResult = mutableDecoder.decode(&mutableGenerator)
 			switch decodingResult {
 			case .Result(let char):
 				encodedString.append(char)
@@ -199,40 +169,73 @@ extension String {
 		}
 		return ret
 	}
+	
+	public var stringByDecodingURL: String? {
+		
+		let percent: UInt8 = 37
+		let plus: UInt8 = 43
+		let capA: UInt8 = 65
+		let capF: UInt8 = 70
+		let lowA: UInt8 = 97
+		let lowF: UInt8 = 102
+		let zero: UInt8 = 48
+		let nine: UInt8 = 57
+		let space: UInt8 = 32
+		
+		var bytesArray = [UInt8]()
+		
+		var g = self.utf8.generate()
+		while let c = g.next() {
+			if c == percent {
+				var newChar = UInt8(0)
+				
+				guard let c1v = g.next() else {
+					return nil
+				}
+				guard let c2v = g.next() else {
+					return nil
+				}
+				
+				if c1v >= capA && c1v <= capF {
+					newChar = c1v - capA + 10
+				} else if c1v >= lowA && c1v <= lowF {
+					newChar = c1v - lowA + 10
+				} else if c1v >= zero && c1v <= nine {
+					newChar = c1v - zero
+				} else {
+					return nil
+				}
+				
+				newChar *= 16
+				
+				if c2v >= capA && c2v <= capF {
+					newChar += c2v - capA + 10
+				} else if c2v >= lowA && c2v <= lowF {
+					newChar += c2v - lowA + 10
+				} else if c2v >= zero && c2v <= nine {
+					newChar += c2v - zero
+				} else {
+					return nil
+				}
+				
+				bytesArray.append(newChar)
+			} else if c == plus {
+				bytesArray.append(space)
+			} else {
+				bytesArray.append(c)
+			}
+		}
+		
+		return UTF8Encoding.encode(bytesArray)
+	}
 }
 
 extension String {
-	/// Parse uuid string
-	/// Results are undefined if the string is not a valid UUID
-	public func asUUID() -> uuid_t {
-		let u = UnsafeMutablePointer<UInt8>.alloc(sizeof(uuid_t))
-		defer {
-			u.destroy() ; u.dealloc(sizeof(uuid_t))
-		}
-		uuid_parse(self, u)
-		return uuid_t(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15])
-	}
-	
-	/// Unparse a uuid_t into the String representation.
-	public static func fromUUID(uuid: uuid_t) -> String {
-		let u = UnsafeMutablePointer<UInt8>.alloc(sizeof(uuid_t))
-		let unu = UnsafeMutablePointer<Int8>.alloc(37) // as per spec. 36 + null
-		
-		defer {
-			u.destroy() ; u.dealloc(sizeof(uuid_t))
-			unu.destroy() ; unu.dealloc(37)
-		}
-		u[0] = uuid.0;u[1] = uuid.1;u[2] = uuid.2;u[3] = uuid.3;u[4] = uuid.4;u[5] = uuid.5;u[6] = uuid.6;u[7] = uuid.7
-		u[8] = uuid.8;u[9] = uuid.9;u[10] = uuid.10;u[11] = uuid.11;u[12] = uuid.12;u[13] = uuid.13;u[14] = uuid.14;u[15] = uuid.15
-		uuid_unparse_lower(u, unu)
-		
-		return String.fromCString(unu)!
-	}
 	
 	/// Parse an HTTP Digest authentication header returning a Dictionary containing each part.
 	public func parseAuthentication() -> [String:String] {
 		var ret = [String:String]()
-		if let _ = self.rangeOfString("Digest ") {
+		if let _ = self.rangeOf("Digest ") {
 			ret["type"] = "Digest"
 			let wantFields = ["username", "nonce", "nc", "cnonce", "response", "uri", "realm", "qop", "algorithm"]
 			for field in wantFields {
@@ -245,7 +248,7 @@ extension String {
 	}
 	
 	private static func extractField(from: String, named: String) -> String? {
-		guard let range = from.rangeOfString(named + "=") else {
+		guard let range = from.rangeOf(named + "=") else {
 			return nil
 		}
 		
@@ -276,20 +279,96 @@ extension String {
 	}
 }
 
-/// Returns a blank uuid_t
-public func empty_uuid() -> uuid_t {
-	return uuid_t(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-}
-
-/// Generate a random uuid_t
-public func random_uuid() -> uuid_t {
-	let u = UnsafeMutablePointer<UInt8>.alloc(sizeof(uuid_t))
-	defer {
-		u.destroy() ; u.dealloc(sizeof(uuid_t))
+extension String {
+	
+	public func stringByReplacingString(find: String, withString: String) -> String {
+		
+		guard !find.isEmpty else {
+			return self
+		}
+		guard !self.isEmpty else {
+			return self
+		}
+		
+		var ret = ""
+		var idx = self.startIndex
+		let endIdx = self.endIndex
+		
+		while idx != endIdx {
+			if self[idx] == find[find.startIndex] {
+				var newIdx = idx.advancedBy(1)
+				var findIdx = find.startIndex.advancedBy(1)
+				let findEndIdx = find.endIndex
+				
+				while newIdx != endIndex && findIdx != findEndIdx && self[newIdx] == find[findIdx] {
+					newIdx = newIdx.advancedBy(1)
+					findIdx = findIdx.advancedBy(1)
+				}
+				
+				if findIdx == findEndIdx { // match
+					ret.appendContentsOf(withString)
+					idx = newIdx
+					continue
+				}
+			}
+			ret.append(self[idx])
+			idx = idx.advancedBy(1)
+		}
+		
+		return ret
 	}
-	uuid_generate_random(u)
-	// is there a better way?
-	return uuid_t(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15])
+	
+	public func substringTo(index: String.Index) -> String {
+		var s = ""
+		var idx = self.startIndex
+		let endIdx = self.endIndex
+		while idx != endIdx && idx != index {
+			s.append(self[idx])
+			idx = idx.successor()
+		}
+		return s
+	}
+	
+	public func substringWith(range: Range<String.Index>) -> String {
+		var s = ""
+		var idx = range.startIndex
+		let endIdx = self.endIndex
+		
+		while idx < endIdx && idx < range.endIndex {
+			s.append(self[idx])
+			idx = idx.successor()
+		}
+		
+		return s
+	}
+	
+	public func rangeOf(string: String, ignoreCase: Bool = false) -> Range<String.Index>? {
+		var idx = self.startIndex
+		let endIdx = self.endIndex
+		
+		while idx != endIdx {
+			if ignoreCase ? (String(self[idx]).lowercaseString == String(string[string.startIndex]).lowercaseString) : (self[idx] == string[string.startIndex]) {
+				var newIdx = idx.advancedBy(1)
+				var findIdx = string.startIndex.advancedBy(1)
+				let findEndIdx = string.endIndex
+				
+				while newIdx != endIndex && findIdx != findEndIdx && (ignoreCase ? (String(self[newIdx]).lowercaseString == String(string[findIdx]).lowercaseString) : (self[newIdx] == string[findIdx])) {
+					newIdx = newIdx.advancedBy(1)
+					findIdx = findIdx.advancedBy(1)
+				}
+				
+				if findIdx == findEndIdx { // match
+					return Range(start: idx, end: newIdx)
+				}
+			}
+			idx = idx.advancedBy(1)
+		}
+		return nil
+	}
+
+	public func contains(string: String) -> Bool {
+		return nil != self.rangeOf(string)
+	}
 }
 
 extension String {
@@ -332,7 +411,9 @@ extension String {
 		r.appendContentsOf(self.characters.split(Character(pathSeparator)).map { String($0) })
 		
 		if addFirstLast && self.endsWithSeparator {
-			r.append(String(pathSeparator))
+			if !self.beginsWithSeparator || r.count > 1 {
+				r.append(String(pathSeparator))
+			}
 		}
 		return r
 	}
@@ -386,9 +467,9 @@ extension String {
 			if noTrailsIndex == startIndex {
 				return self
 			}
-			return self.substringToIndex(noTrailsIndex)
+			return self.substringTo(noTrailsIndex)
 		}
-		return self.substringToIndex(endIndex)
+		return self.substringTo(endIndex)
 	}
 	
 	var pathExtension: String {
@@ -411,26 +492,30 @@ extension String {
 		guard endIndex != startIndex else {
 			return ""
 		}
-		return self.substringWithRange(Range(start:endIndex.successor(), end:noTrailsIndex))
+		return self.substringWith(Range(start:endIndex.successor(), end:noTrailsIndex))
 	}
 
 	var stringByResolvingSymlinksInPath: String {
-		let absolute = self.beginsWithSeparator
-		let components = self.pathComponents(false)
-		var s = absolute ? "/" : ""
-		for component in components {
-			if component == "." {
-				s.appendContentsOf(".")
-			} else if component == ".." {
-				s.appendContentsOf("..")
-			} else {
-				let file = File(s + "/" + component)
-				s = file.realPath()
-			}
-		}
-		let ary = s.pathComponents(false) // get rid of slash runs
-		return absolute ? "/" + ary.joinWithSeparator(String(pathSeparator)) : ary.joinWithSeparator(String(pathSeparator))
+		return File(self).realPath()
+		
+//		let absolute = self.beginsWithSeparator
+//		let components = self.pathComponents(false)
+//		var s = absolute ? "/" : ""
+//		for component in components {
+//			if component == "." {
+//				s.appendContentsOf(".")
+//			} else if component == ".." {
+//				s.appendContentsOf("..")
+//			} else {
+//				let file = File(s + "/" + component)
+//				s = file.realPath()
+//			}
+//		}
+//		let ary = s.pathComponents(false) // get rid of slash runs
+//		return absolute ? "/" + ary.joinWithSeparator(String(pathSeparator)) : ary.joinWithSeparator(String(pathSeparator))
 	}
+	
+	
 }
 
 

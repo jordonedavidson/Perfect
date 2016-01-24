@@ -23,18 +23,39 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-
-import Darwin
 import PerfectLib
+#if os(Linux)
+	import SwiftGlibc
+#else
+	import Darwin
+#endif
 
 func startServer() throws {
 
-	let dir = String.fromCString(getcwd(nil, 0)) ?? ""
-	print("Current working directory: \(dir)")
-
 	let ls = PerfectServer.staticPerfectServer
 	ls.initializeServices()
+
+	var sockPath = "./perfect.fastcgi.sock"
+	var args = Process.arguments
+	
+	let validArgs = [
+		
+		"--sockpath": {
+			args.removeFirst()
+			sockPath = args.first!
+		},
+		"--help": {
+			print("Usage: \(Process.arguments.first!) [--sockpath socket_path]")
+			exit(0)
+		}]
+	
+	while args.count > 0 {
+		if let closure = validArgs[args.first!.lowercaseString] {
+			closure()
+		}
+		args.removeFirst()
+	}
 	
 	let fastCgiServer = FastCGIServer()
-	try fastCgiServer.start("./perfect.fastcgi.sock")
+	try fastCgiServer.start(sockPath)
 }

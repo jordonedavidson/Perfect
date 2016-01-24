@@ -24,8 +24,12 @@
 //
 
 
-import Dispatch
+import Foundation
 import LibEvent
+
+#if os(Linux)
+import SwiftGlibc
+#endif
 
 // I'm unsure why these aren't coming through
 /** Indicates that a timeout has occurred.  It's not necessary to pass
@@ -42,7 +46,6 @@ private typealias PrimEventCallBack = @convention(c) (Int32, Int16, UnsafeMutabl
 class LibEvent {
 	
 	internal static let eventBase: LibEventBase = LibEventBase()
-	
 	
 	private var event: COpaquePointer? = nil
 	private var userData: AnyObject?
@@ -65,7 +68,7 @@ class LibEvent {
 			
 			evt.del()
 			
-			dispatch_async(queue) {
+			Threading.dispatchBlock(queue) {
 				callBack(a, b, userData)
 			}
 		}
@@ -78,7 +81,7 @@ class LibEvent {
 		self.userData = userData
 		self.cb = callBack
 		self.base = base
-		event = event_new(base.eventBase, fd, Int16(what), LibEvent.eventCallBack, UnsafeMutablePointer(Unmanaged.passRetained(self).toOpaque()))
+		self.event = event_new(base.eventBase, fd, Int16(what), LibEvent.eventCallBack, UnsafeMutablePointer(Unmanaged.passRetained(self).toOpaque()))
 	}
 	
 	deinit {
@@ -96,8 +99,12 @@ class LibEvent {
 			var tv: timeval = timeval()
 			let i = floor(timeout)
 			let f = timeout - i
-			tv.tv_sec = __darwin_time_t(i)
-			tv.tv_usec = __darwin_suseconds_t(f * 100000)
+			tv.tv_sec = Int(i)
+#if os(Linux)
+			tv.tv_usec = Int(f * 100000)
+#else
+			tv.tv_usec = Int32(f * 100000)
+#endif
 			event_add(event!, &tv)
 		}
 	}
@@ -119,14 +126,16 @@ let EVLOOP_NO_EXIT_ON_EMPTY = Int32(0/*0x04*/) // not supported until libevent 2
 class LibEventBase {
 	
 	var eventBase: COpaquePointer
-	private var baseDispatchQueue: dispatch_queue_t
-	var eventDispatchQueue: dispatch_queue_t
+	private var baseDispatchQueue: Threading.ThreadQueue
+	var eventDispatchQueue: Threading.ThreadQueue
 	
 	init() {
 		evthread_use_pthreads()
 		
-		baseDispatchQueue = dispatch_queue_create("LibEvent Base", DISPATCH_QUEUE_SERIAL)
-		eventDispatchQueue = dispatch_queue_create("LibEvent Event", DISPATCH_QUEUE_CONCURRENT)
+		// !FIX! this is not ideal, but since we are the only ones dispatching to this queue, 
+		// and it only happens from within the singular libevent loop,  we can ensure is it not called concurrently.
+		baseDispatchQueue = Threading.createConcurrentQueue("LibEvent Base") //Threading.createSerialQueue("LibEvent Base")
+		eventDispatchQueue = Threading.createConcurrentQueue("LibEvent Event")
 		eventBase = event_base_new()
 		
 		addDummyEvent()
@@ -144,7 +153,7 @@ class LibEventBase {
 	}
 	
 	private func triggerEventBaseLoop() {
-		dispatch_async(baseDispatchQueue) {
+		Threading.dispatchBlock(baseDispatchQueue) {
 			self.eventBaseLoop()
 		}
 	}

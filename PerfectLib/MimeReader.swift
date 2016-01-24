@@ -24,7 +24,13 @@
 //
 
 import Foundation
-import Darwin
+#if os(Linux)
+	import SwiftGlibc
+	import LinuxBridge
+	let S_IRUSR = __S_IREAD
+	let S_IROTH = (S_IRGRP >> 3)
+	let S_IWOTH = (S_IWGRP >> 3)
+#endif
 
 enum MimeReadState {
 	case StateNone
@@ -108,9 +114,9 @@ public class MimeReader {
 	/// - parameter tempDir: The path to the directory in which to store temporary files. Defaults to "/tmp/".
 	public init(_ contentType: String, tempDir: String = "/tmp/") {
 		self.tempDirectory = tempDir
-		if contentType.rangeOfString(kMultiPartForm) != nil {
+		if contentType.rangeOf(kMultiPartForm) != nil {
 			self.multi = true
-			if let range = contentType.rangeOfString(kBoundary) {
+			if let range = contentType.rangeOf(kBoundary) {
 				
 				var startIndex = range.startIndex.successor()
 				for _ in 1...kBoundary.characters.count {
@@ -118,7 +124,7 @@ public class MimeReader {
 				}
 				let endIndex = contentType.endIndex
 				
-				let boundaryString = contentType.substringWithRange(Range(start: startIndex, end: endIndex))
+				let boundaryString = contentType.substringWith(Range(start: startIndex, end: endIndex))
 				self.boundary.appendContentsOf("--")
 				self.boundary.appendContentsOf(boundaryString)
 				self.state = .StateBoundary
@@ -166,7 +172,7 @@ public class MimeReader {
 				break
 			}
 			
-			if Darwin.tolower(Int32(gened!)) != Darwin.tolower(Int32(bytes[check])) {
+			if tolower(Int32(gened!)) != tolower(Int32(bytes[check])) {
 				break
 			}
 			
@@ -179,7 +185,7 @@ public class MimeReader {
 		
 		var accum = ""
 		
-		if let nameRange = from.rangeOfString(name + "=", options: NSStringCompareOptions.CaseInsensitiveSearch) {
+		if let nameRange = from.rangeOf(name + "=", ignoreCase: true) {
 			var start = nameRange.endIndex
 			let end = from.endIndex
 			
@@ -198,7 +204,7 @@ public class MimeReader {
 		return accum
 	}
 	
-	func internalAddToBuffer(inout bytes: [UInt8]) -> MimeReadState {
+	func internalAddToBuffer(bytes: [UInt8]) -> MimeReadState {
 		
 		var clearBuffer = true
 		var position = bytes.startIndex
@@ -348,7 +354,7 @@ public class MimeReader {
 								
 								// end of file data
 								spec.file!.close()
-								Darwin.chmod(spec.file!.path(), S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH)
+								chmod(spec.file!.path(), mode_t(S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH))
 								break
 								
 							} else if position.distanceTo(end) - 2 < self.boundary.characters.count {
@@ -411,14 +417,14 @@ public class MimeReader {
 	
 	/// Add data to be parsed.
 	/// - parameter bytes: The array of UInt8 to be parsed.
-	public func addToBuffer(var bytes: [UInt8]) {
+	public func addToBuffer(bytes: [UInt8]) {
 		if isMultiPart() {
 			
 			if self.buffer.count != 0 {
 				self.buffer.appendContentsOf(bytes)
-				internalAddToBuffer(&self.buffer)
+				internalAddToBuffer(self.buffer)
 			} else {
-				internalAddToBuffer(&bytes)
+				internalAddToBuffer(bytes)
 			}
 		} else {
 			self.buffer.appendContentsOf(bytes)

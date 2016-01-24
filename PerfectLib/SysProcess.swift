@@ -23,8 +23,13 @@
 //	program. If not, see <http://www.perfect.org/AGPL_3_0_With_Perfect_Additional_Terms.txt>.
 //
 
-
-import Darwin
+import Foundation
+#if os(Linux)
+	import SwiftGlibc
+	let WUNTRACED = Int32(2)
+	let WNOHANG = Int32(1)
+	let SIGTERM = Int32(15)
+#endif
 
 /// This class permits an external process to be launched given a set of command line arguments and environment variables.
 /// The standard in, out and err file streams are made available. The process can be terminated or permitted to be run to completion.
@@ -53,8 +58,9 @@ public class SysProcess : Closeable {
 		cArgs[0] = strdup(cmd)
 		cArgs[cArgsCount + 1] = UnsafeMutablePointer<CChar>(())
 		var idx = 0
-		for (; idx < cArgsCount; ++idx) {
+		while idx < cArgsCount {
 			cArgs[idx+1] = strdup(args![idx])
+			idx += 1
 		}
 		
 		let cEnvCount = env != nil ? env!.count : 0
@@ -64,8 +70,9 @@ public class SysProcess : Closeable {
 		
 		cEnv[cEnvCount] = UnsafeMutablePointer<CChar>(())
 		idx = 0
-		for (; idx < cEnvCount; ++idx) {
+		while idx < cEnvCount {
 			cEnv[idx] = strdup(env![idx].0 + "=" + env![idx].1)
+			idx += 1
 		}
 		
 		let fSTDIN = UnsafeMutablePointer<Int32>.alloc(2)
@@ -78,9 +85,9 @@ public class SysProcess : Closeable {
 			fSTDERR.destroy() ; fSTDERR.dealloc(2)
 		}
 		
-		Darwin.pipe(fSTDIN)
-		Darwin.pipe(fSTDOUT)
-		Darwin.pipe(fSTDERR)
+		pipe(fSTDIN)
+		pipe(fSTDOUT)
+		pipe(fSTDERR)
 		
 		var action = posix_spawn_file_actions_t()
 		
@@ -97,19 +104,32 @@ public class SysProcess : Closeable {
 		posix_spawn_file_actions_addclose(&action, fSTDERR[1]);
   
 		var procPid = pid_t()
-		let spawnRes = Darwin.posix_spawnp(&procPid, cmd, &action, UnsafeMutablePointer<posix_spawnattr_t>(()), cArgs, cEnv)
+		let spawnRes = posix_spawnp(&procPid, cmd, &action, UnsafeMutablePointer<posix_spawnattr_t>(()), cArgs, cEnv)
 		posix_spawn_file_actions_destroy(&action)
 		
 		idx = 0
-		for (; idx < cArgsCount; ++idx) {
+		while idx < cArgsCount {
 			free(cArgs[idx])
+			idx += 1
 		}
 		
 		idx = 0
-		for (; idx < cEnvCount; ++idx) {
+		while idx < cEnvCount {
 			free(cEnv[idx])
+			idx += 1
 		}
-		
+
+	#if os(Linux)
+		SwiftGlibc.close(fSTDIN[0])
+		SwiftGlibc.close(fSTDOUT[1])
+		SwiftGlibc.close(fSTDERR[1])
+		if spawnRes != 0 {
+			SwiftGlibc.close(fSTDIN[1])
+			SwiftGlibc.close(fSTDOUT[0])
+			SwiftGlibc.close(fSTDERR[0])
+			try ThrowSystemError()
+		}
+	#else
 		Darwin.close(fSTDIN[0])
 		Darwin.close(fSTDOUT[1])
 		Darwin.close(fSTDERR[1])
@@ -119,7 +139,7 @@ public class SysProcess : Closeable {
 			Darwin.close(fSTDERR[0])
 			try ThrowSystemError()
 		}
-		
+	#endif
 		self.pid = procPid
 		self.stdin = File(fd: fSTDIN[1], path: "")
 		self.stdout = File(fd: fSTDOUT[0], path: "")
@@ -168,7 +188,7 @@ public class SysProcess : Closeable {
 	/// Determine if the process has completed running and retrieve its result code.
 	public func wait(hang: Bool = true) throws -> Int32 {
 		var code = Int32(0)
-		let status = Darwin.waitpid(self.pid, &code, WUNTRACED | (hang ? 0 : WNOHANG))
+		let status = waitpid(self.pid, &code, WUNTRACED | (hang ? 0 : WNOHANG))
 		if status == -1 {
 			try ThrowSystemError()
 		}
@@ -179,7 +199,11 @@ public class SysProcess : Closeable {
 	
 	/// Terminate the process and return its result code.
 	public func kill(signal: Int32 = SIGTERM) throws -> Int32 {
+	#if os(Linux)
+		let status = SwiftGlibc.kill(self.pid, signal)
+	#else
 		let status = Darwin.kill(self.pid, signal)
+	#endif
 		guard status != -1 else {
 			try ThrowSystemError()
 		}

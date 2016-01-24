@@ -34,7 +34,19 @@ public class Cookie {
 	var secure: Bool?
 	var httpOnly: Bool?
 }
+/*
+class MustacheCacheItem {
+	let modificationDate: Int
+	let template: MustacheTemplate
+	
+	init(modificationDate: Int, template: MustacheTemplate) {
+		self.modificationDate = modificationDate
+		self.template = template
+	}
+}
 
+let mustacheTemplateCache = RWLockCache<String, MustacheCacheItem>()
+*/
 /// Represents an outgoing web response. Handles the following tasks:
 /// - Management of sessions
 /// - Collecting HTTP response headers & cookies.
@@ -60,6 +72,8 @@ public class WebResponse {
 	
 	var sessions = Dictionary<String, SessionManager>()
 	
+	public var requestCompletedCallback: () -> () = {}
+	
 	internal init(_ c: WebConnection, request: WebRequest) {
 		self.connection = c
 		self.request = request
@@ -80,11 +94,26 @@ public class WebResponse {
 		self.cookiesArray.append(cookie)
 	}
 	
-	func respond() {
+	public func appendBodyBytes(bytes: [UInt8]) {
+		self.bodyData.appendContentsOf(bytes)
+	}
+	
+	public func appendBodyString(string: String) {
+		self.bodyData.appendContentsOf([UInt8](string.utf8))
+	}
+	
+	func respond(completion: () -> ()) {
+		
+		self.requestCompletedCallback = {
+			
+			self.doSessionHeaders()
+			self.sendResponse()
+			self.commitSessions()
+			
+			completion()
+		}
+		
 		doMainBody()
-		doSessionHeaders()
-		sendResponse()
-		commitSessions()
 	}
 	
 	/// !FIX! needs to pull key from possible request param
@@ -138,7 +167,7 @@ public class WebResponse {
 	
 	/// Set a HTTP header, replacing all existing instances of said header
 	public func replaceHeader(name: String, value: String) {
-		for var i = 0; i < self.headersArray.count; ++i {
+		for i in 0..<self.headersArray.count {
 			if self.headersArray[i].0 == name {
 				self.headersArray.removeAtIndex(i)
 			}
@@ -146,7 +175,8 @@ public class WebResponse {
 		self.addHeader(name, value: value)
 	}
 	
-	private func sendResponse() {
+	// directly called by the WebSockets impl
+	func sendResponse() {
 		for (key, value) in headersArray {
 			connection.writeHeaderLine(key + ": " + value)
 		}
@@ -164,8 +194,24 @@ public class WebResponse {
 						format: standardDateFormat, timezone: "GMT")
 					cookieLine.appendContentsOf(formattedDate)
 				}
-				// etc...
-				connection.writeHeaderLine(cookieLine)
+				if let path = cookie.path {
+					cookieLine.appendContentsOf("; path=" + path)
+				}
+				if let domain = cookie.domain {
+					cookieLine.appendContentsOf("; domain=" + domain)
+				}
+				if let secure = cookie.secure {
+					if secure == true {
+						cookieLine.appendContentsOf("; secure")
+					}
+				}
+				if let httpOnly = cookie.httpOnly {
+					if httpOnly == true {
+						cookieLine.appendContentsOf("; HttpOnly")
+					}
+				}
+                // etc...
+                connection.writeHeaderLine(cookieLine)
 			}
 		}
 		connection.writeHeaderLine("Content-Length: \(bodyData.count)")
@@ -177,7 +223,7 @@ public class WebResponse {
 		
 		do {
 		
-			try include(request.pathInfo())
+			return try include(request.pathInfo(), local: false)
 			
 		} catch PerfectError.FileError(let code, let msg) {
 			
@@ -200,6 +246,7 @@ public class WebResponse {
 		} catch let e {
 			print("Unexpected exception \(e)")
 		}
+		self.requestCompletedCallback()
 	}
 	
 	func doSessionHeaders() {
@@ -218,11 +265,14 @@ public class WebResponse {
 		}
 	}
 	
-	func include(path: String, local: Bool = false) throws {
-		
-		if !path.hasSuffix("."+mustacheExtension) {
-			throw PerfectError.FileError(404, "The file \(path) was not a mustache template file")
+	func includeVirtual(path: String) throws {
+		guard let handler = PageHandlerRegistry.getRequestHandler(self) else {
+			throw PerfectError.FileError(404, "The path \(path) had no associated handler")
 		}
+		handler.handleRequest(self.request, response: self)
+	}
+	
+	func include(path: String, local: Bool) throws {
 		
 		var fullPath = path
 		if !path.hasPrefix("/") {
@@ -230,8 +280,17 @@ public class WebResponse {
 		}
 		fullPath = request.documentRoot + fullPath
 		
+		let file = File(fullPath)
+		
+		if PageHandlerRegistry.hasGlobalHandler() && (!path.hasSuffix("."+mustacheExtension) || !file.exists()) {
+			return try self.includeVirtual(path)
+		}
+		
+		if !path.hasSuffix("."+mustacheExtension) {
+			throw PerfectError.FileError(404, "The file \(path) was not a mustache template file")
+		}
+		
 		do {
-			let file = File(fullPath)
 			guard file.exists() else {
 				throw PerfectError.FileError(404, "Not Found")
 			}
@@ -239,9 +298,6 @@ public class WebResponse {
 			try file.openRead()
 			defer { file.close() }
 			let bytes = try file.readSomeBytes(file.size())
-			
-			// !FIX! cache parsed mustache files
-			// check mod dates for recompilation
 			
 			let parser = MustacheParser()
 			let str = UTF8Encoding.encode(bytes)
@@ -257,9 +313,9 @@ public class WebResponse {
 			template.evaluate(context, collector: collector)
 			
 			let fullString = collector.asString()
-//			print(fullString)
 			self.bodyData += Array(fullString.utf8)
 		}
+		self.requestCompletedCallback()
 	}
 	
 	private func makeNonRelative(path: String, local: Bool = false) -> String {
@@ -271,6 +327,63 @@ public class WebResponse {
 		}
 		return request.pathInfo().stringByDeletingLastPathComponent + "/" + path
 	}
+	
+	
+	// WARNING NOTE Using the RWLockCache, even just for read access seems to bring out some sort of bug in the
+	// ARC system. Therefore, this function is not currently called.
+	// !FIX! track this problem down
+	/*
+	func includeCached(path: String, local: Bool = false) throws {
+	
+	if !path.hasSuffix("."+mustacheExtension) {
+	throw PerfectError.FileError(404, "The file \(path) was not a mustache template file")
+	}
+	
+	var fullPath = path
+	if !path.hasPrefix("/") {
+	fullPath = makeNonRelative(path, local: local)
+	}
+	fullPath = request.documentRoot + fullPath
+	
+	do {
+	let file = File(fullPath)
+	guard file.exists() else {
+	throw PerfectError.FileError(404, "Not Found")
+	}
+	let diskModTime = file.modificationTime()
+	var cacheItem = mustacheTemplateCache.valueForKey(fullPath)//, validatorCallback: { (value) -> Bool in
+	//				return diskModTime == value.modificationDate
+	//			})
+	
+	if cacheItem == nil {
+	print("REPLACING")
+	try file.openRead()
+	defer { file.close() }
+	let bytes = try file.readSomeBytes(file.size())
+	
+	let parser = MustacheParser()
+	let str = UTF8Encoding.encode(bytes)
+	let template = try parser.parse(str)
+	cacheItem = MustacheCacheItem(modificationDate: diskModTime, template: template)
+	mustacheTemplateCache.setValueForKey(fullPath, value: cacheItem!)
+	}
+	
+	let template = cacheItem!.template
+	let context = MustacheEvaluationContext(webResponse: self)
+	context.filePath = fullPath
+	
+	let collector = MustacheEvaluationOutputCollector()
+	template.templateName = path
+	
+	try template.evaluatePragmas(context, collector: collector)
+	template.evaluate(context, collector: collector)
+	
+	let fullString = collector.asString()
+	self.bodyData += Array(fullString.utf8)
+	}
+	}
+	*/
+	
 }
 
 
